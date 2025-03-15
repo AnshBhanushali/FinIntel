@@ -22,14 +22,14 @@ class StockRequest(BaseModel):
     start_date: str
     end_date: str
     indicators: Optional[List[str]] = ["SMA_50", "EMA_20", "RSI", "MACD", "BBANDS"]
-    forecast_models: Optional[List[str]] = ["ARIMA", "PROPHET"]  
+    forecast_models: Optional[List[str]] = ["ARIMA", "PROPHET"]
 
 app = FastAPI()
 
 CACHE = {}
 
 class LSTMModel(nn.Module):
-    """ this for advanced forcasting """
+    """This is for advanced forecasting using LSTM."""
     def __init__(self, input_dim=1, hidden_dim=50, output_dim=1, num_layers=2):
         super(LSTMModel, self).__init__()
         self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
@@ -43,16 +43,15 @@ class LSTMModel(nn.Module):
         return out
 
 async def fetch_stock_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """This would asynchronously fetch data stck data from yfinance"""
-
-    # Here we check cache first
+    """This function asynchronously fetches stock data from yfinance."""
+    # Check cache first
     cache_key = f"{ticker}_{start_date}_{end_date}"
     if cache_key in CACHE:
-        logger.info(f"cache hit for {cache_key}")
+        logger.info(f"Cache hit for {cache_key}")
         return CACHE[cache_key].copy()
 
     logger.info(f"Fetching data for {ticker} from {start_date} to {end_date} ...")
-    # Example: using yfinance asynchronously 
+    # Placeholder for an asynchronous HTTP call (if needed)
     async with aiohttp.ClientSession() as session:
         pass
 
@@ -61,12 +60,12 @@ async def fetch_stock_data(ticker: str, start_date: str, end_date: str) -> pd.Da
     if data.empty:
         raise HTTPException(status_code=404, detail="No data found for specified ticker/date range.")
     
-    # Cache result
+    # Cache the result
     CACHE[cache_key] = data
     return data.copy()
 
 def compute_indicators(df: pd.DataFrame, indicators: List[str]) -> pd.DataFrame:
-    """Compute selected technical indicators on the price DataFrame for advanced stock reading"""
+    """Compute selected technical indicators on the price DataFrame."""
     df = df.copy()
     for ind in indicators:
         if ind.startswith("SMA"):
@@ -91,9 +90,9 @@ def compute_indicators(df: pd.DataFrame, indicators: List[str]) -> pd.DataFrame:
 
 def forecast_arima(series: pd.Series, steps: int = 30):
     try:
-        model = ARIMA(series, order = (1,1,1))
+        model = ARIMA(series, order=(1, 1, 1))
         model_fit = model.fit()
-        pred = model_fit.forecast(steps = steps)
+        pred = model_fit.forecast(steps=steps)
         return pred.tolist()
     except Exception as e:
         logger.error(f"ARIMA forecasting failed: {e}")
@@ -101,7 +100,7 @@ def forecast_arima(series: pd.Series, steps: int = 30):
 
 def forecast_prophet(df: pd.DataFrame, steps: int = 30):
     """
-    Expects df with columns ['ds', 'y']. Convert from your original DF: ds=Date, y=Close
+    Expects a DataFrame with columns ['ds', 'y'] (ds=Date, y=Close).
     """
     try:
         model = Prophet()
@@ -114,17 +113,14 @@ def forecast_prophet(df: pd.DataFrame, steps: int = 30):
         return []
 
 def forecast_lstm(df: pd.DataFrame, steps: int = 30):
-    """ LSTM approach. Here we train our model offline or dynamically """
+    """LSTM approach. This assumes a pre-trained model is available."""
     try:
-        # Hypothetical pre-trained model path
-        model_path = "models/lstm_stock_model.pt"  
+        model_path = "models/lstm_stock_model.pt"  # Hypothetical model path
         model = LSTMModel()
         model.load_state_dict(torch.load(model_path))
         model.eval()
-        
-        # This function would return a list of predicted prices or a timeseries
-        return [100.0 + i for i in range(steps)]  
-    
+        # Return dummy predictions for now
+        return [100.0 + i for i in range(steps)]
     except Exception as e:
         logger.error(f"LSTM forecasting failed: {e}")
         return []
@@ -140,7 +136,6 @@ def ensemble_forecast(df: pd.DataFrame, models: List[str]) -> dict:
     if "ARIMA" in models:
         results["ARIMA"] = forecast_arima(close_series)
     if "PROPHET" in models:
-        # Need to rename columns for Prophet
         prophet_df = pd.DataFrame({
             "ds": close_series.index,
             "y": close_series.values
@@ -153,13 +148,11 @@ def ensemble_forecast(df: pd.DataFrame, models: List[str]) -> dict:
     try:
         num_models = len([k for k in results if results[k]])
         if num_models > 0:
-            # Just a naive approach
-            forecast_length = 30 
+            forecast_length = 30  # Naively fixed forecast length
             for step_idx in range(forecast_length):
                 step_values = []
                 for m_key, f_data in results.items():
                     if m_key == "PROPHET":
-                        # get yhat from the step
                         step_values.append(f_data[step_idx]['yhat'])
                     else:
                         step_values.append(f_data[step_idx])
@@ -174,6 +167,25 @@ def ensemble_forecast(df: pd.DataFrame, models: List[str]) -> dict:
         "ensemble": combined_forecast
     }
 
+async def ollama_query(prompt: str) -> str:
+    """Query Ollama for advanced AI insights."""
+    url = "http://localhost:11434/run"  # Adjust URL as needed for your Ollama instance
+    payload = {
+        "model": "llama2",  # Specify the desired model name
+        "prompt": prompt
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                if response.status != 200:
+                    logger.error(f"Ollama query failed with status {response.status}")
+                    return "Ollama query failed."
+                data = await response.json()
+                return data.get("output", "No output from Ollama.")
+    except Exception as e:
+        logger.error(f"Ollama query exception: {e}")
+        return "Ollama query encountered an exception."
+
 @app.post("/analyze-technical/")
 async def analyze_technical(request: StockRequest):
     try:
@@ -182,18 +194,30 @@ async def analyze_technical(request: StockRequest):
             start_date=request.start_date,
             end_date=request.end_date
         )
-        # Compute indicators
+        # Compute technical indicators
         df_with_ind = compute_indicators(df, request.indicators)
 
-        # Forecast
+        # Generate forecasts using selected models
         ensemble_results = ensemble_forecast(df_with_ind, request.forecast_models)
 
-        # Package results
+        # Construct a prompt for advanced AI insight using Ollama
+        prompt = (
+            f"Provide an advanced analysis for the following stock data:\n"
+            f"Ticker: {request.ticker}\n"
+            f"Indicators: {request.indicators}\n"
+            f"Latest Indicator values: {df_with_ind.iloc[-1][request.indicators].to_dict()}\n"
+            f"Forecasts: {ensemble_results}\n"
+            f"Generate insights and potential trading strategies."
+        )
+        ai_insight = await ollama_query(prompt)
+
+        # Package and return the results
         return {
             "ticker": request.ticker,
             "indicators": request.indicators,
             "latest_indicators": df_with_ind.iloc[-1][request.indicators].to_dict(),
-            "forecasts": ensemble_results
+            "forecasts": ensemble_results,
+            "ai_insight": ai_insight
         }
     except Exception as e:
         logger.error(f"analyze_technical endpoint error: {e}")
