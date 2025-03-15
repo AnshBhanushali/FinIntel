@@ -8,7 +8,7 @@ import pandas as pd
 import pandas_ta as ta
 
 # Options to use statsmodels, prophet, and your custom LSTM
-from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.arima.model import ARIMA, steps
 from prophet import Prophet
 import torch
 from torch import nn
@@ -64,3 +64,51 @@ async def fetch_stock_data(ticker: str, start_date: str, end_date: str) -> pd.Da
     # Cache result
     CACHE[cache_key] = data
     return data.copy()
+
+def compute_indicators(df: pd.DataFrame, indicators: List[str]) -> pd.DataFrame:
+    """Compute selected technical indicators on the price DataFrame for advanced stock reading"""
+    df = df.copy()
+    for ind in indicators:
+        if ind.startswith("SMA"):
+            length = int(ind.split("_")[1])
+            df[ind] = ta.sma(df['Close'], length=length)
+        elif ind.startswith("EMA"):
+            length = int(ind.split("_")[1])
+            df[ind] = ta.ema(df['Close'], length=length)
+        elif ind == "RSI":
+            df[ind] = ta.rsi(df['Close'])
+        elif ind == "MACD":
+            macd_values = ta.macd(df['Close'])
+            df['MACD_line'] = macd_values['MACD_12_26_9']
+            df['MACD_signal'] = macd_values['MACDs_12_26_9']
+            df['MACD_hist'] = macd_values['MACDh_12_26_9']
+        elif ind == "BBANDS":
+            bb = ta.bbands(df['Close'])
+            df["BB_upper"] = bb['BBU_20_2.0']
+            df["BB_middle"] = bb['BBM_20_2.0']
+            df["BB_lower"] = bb['BBL_20_2.0']
+    return df
+
+def forcast_arima(series: pd.Series, step: int = 30):
+    try:
+        model = ARIMA(series, order = (1,1,1))
+        model_fit = model.fit()
+        pred = model_fit.forecast(steps = steps)
+        return pred.tolist()
+    except Exception as e:
+        logger.error(f"ARIMA forecasting failed: {e}")
+        return []
+
+def forecast_prophet(df: pd.DataFrame, steps: int = 30):
+    """
+    Expects df with columns ['ds', 'y']. Convert from your original DF: ds=Date, y=Close
+    """
+    try:
+        model = Prophet()
+        model.fit(df)
+        future = model.make_future_dataframe(periods=steps)
+        forecast = model.predict(future)
+        return forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(steps).to_dict(orient='records')
+    except Exception as e:
+        logger.error(f"Prophet forecasting failed: {e}")
+        return []
