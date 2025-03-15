@@ -49,3 +49,23 @@ def analyze_fundamentals(request: FundamentalRequest):
 
         business_summary = business_pattern.search(filing_text)
         risk_factors = risk_pattern.search(filing_text)
+    
+        if business_summary:
+            business_summary_text = business_summary.group(1)
+        else:
+            business_summary_text = "N/A"
+
+        if risk_factors:
+            risk_factors_text = risk_factors.group(1)
+        else:
+            risk_factors_text = "N/A"
+
+        # Step 3: Summarize text with T5
+        summarized_business = summarizer(business_summary_text, max_length=200, min_length=30, do_sample=False)[0]['summary_text']
+        summarized_risks = summarizer(risk_factors_text, max_length=200, min_length=30, do_sample=False)[0]['summary_text']
+
+
+    
+    except Exception as e:
+        logger.error(f"Error analyzing fundamentals for {request.ticker}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
