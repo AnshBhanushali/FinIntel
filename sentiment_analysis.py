@@ -64,3 +64,59 @@ def classify_stock(sentiment_score, var_loss):
         return "SELL"
     else:
         return "HOLD"
+
+@app.post("/analyze-sentiment/")
+def analyze_sentiment(request: SentimentRequest):
+    """
+    1. Fetch relevant articles/posts from each source
+    2. Run each text snippet through FinBERT for sentiment classification.
+    3. Aggregate average sentiment.
+    4. Run a Monte Carlo simulation for risk and compute VaR.
+    5. Return classification (Buy/Sell/Hold) with confidence.
+    """
+    try:
+        # 1) Fetching mock data for demonstration
+        texts = [
+            f"{request.ticker} is doing great! Big upside expected.",
+            f"Some negative outlook for {request.ticker} due to supply chain issues."
+        ]
+
+        # 2) Classify sentiment for each text
+        total_score = 0
+        for txt in texts:
+            inputs = finbert_tokenizer(txt, return_tensors="pt", max_length=512, truncation=True)
+            outputs = finbert_model(**inputs)
+            probs = torch.softmax(outputs.logits, dim=1).detach().numpy()[0]
+            sentiment_idx = probs.argmax()
+            # Weighted average: (probability of the predicted class) * sign (+1 for positive, -1 for negative, 0 for neutral)
+            if sentiment_idx == 2:  # positive
+                total_score += probs[sentiment_idx]  # e.g., +0.8
+            elif sentiment_idx == 0:  # negative
+                total_score -= probs[sentiment_idx]  # e.g., -0.6
+            else:
+                total_score += 0
+
+        avg_sentiment_score = total_score / len(texts)
+        # Convert from range [0..1] for a simplified measure
+        normalized_sentiment = (avg_sentiment_score + 1) / 2
+
+        # 3) Monte Carlo for risk
+        mean_return = normalized_sentiment / 100.0
+        std_dev = 0.02  # toy standard deviation
+        dist = simulate_monte_carlo(mean_return, std_dev, days=30, simulations=1000)
+        var_loss = calculate_var(dist, confidence=0.95)
+
+        # 4) Classify the stock
+        recommendation = classify_stock(normalized_sentiment, var_loss)
+        confidence = round(abs(normalized_sentiment), 2) 
+
+        return {
+            "ticker": request.ticker,
+            "average_sentiment": normalized_sentiment,
+            "var_loss_95": var_loss,
+            "recommendation": recommendation,
+            "confidence_score": confidence
+        }
+    except Exception as e:
+        logger.error(f"Sentiment Analysis error for {request.ticker}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
