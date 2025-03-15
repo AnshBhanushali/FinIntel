@@ -8,7 +8,7 @@ import pandas as pd
 import pandas_ta as ta
 
 # Options to use statsmodels, prophet, and your custom LSTM
-from statsmodels.tsa.arima.model import ARIMA, steps
+from statsmodels.tsa.arima.model import ARIMA, steps, forcast_arima
 from prophet import Prophet
 import torch
 from torch import nn
@@ -112,3 +112,64 @@ def forecast_prophet(df: pd.DataFrame, steps: int = 30):
     except Exception as e:
         logger.error(f"Prophet forecasting failed: {e}")
         return []
+
+def forecast_lstm(df: pd.DataFrame, steps: int = 30):
+    """ LSTM approach. Here we train our model offline or dynamically """
+    try:
+        # Hypothetical pre-trained model path
+        model_path = "models/lstm_stock_model.pt"  
+        model = LSTMModel()
+        model.load_state_dict(torch.load(model_path))
+        model.eval()
+        
+        # This function would return a list of predicted prices or a timeseries
+        return [100.0 + i for i in range(steps)]  
+    
+    except Exception as e:
+        logger.error(f"LSTM forecasting failed: {e}")
+        return []
+
+def ensemble_forecast(df: pd.DataFrame, models: List[str]) -> dict:
+    """
+    Combine forecasts from ARIMA, Prophet, LSTM, etc.
+    A simple ensemble could be the average of predictions.
+    """
+    close_series = df['Close'].dropna()
+    results = {}
+
+    if "ARIMA" in models:
+        results["ARIMA"] = forecast_arima(close_series)
+    if "PROPHET" in models:
+        # Need to rename columns for Prophet
+        prophet_df = pd.DataFrame({
+            "ds": close_series.index,
+            "y": close_series.values
+        })
+        results["PROPHET"] = forecast_prophet(prophet_df)
+    if "LSTM" in models:
+        results["LSTM"] = forecast_lstm(close_series)
+
+    combined_forecast = []
+    try:
+        num_models = len([k for k in results if results[k]])
+        if num_models > 0:
+            # Just a naive approach
+            forecast_length = 30 
+            for step_idx in range(forecast_length):
+                step_values = []
+                for m_key, f_data in results.items():
+                    if m_key == "PROPHET":
+                        # get yhat from the step
+                        step_values.append(f_data[step_idx]['yhat'])
+                    else:
+                        step_values.append(f_data[step_idx])
+                combined_forecast.append(sum(step_values) / len(step_values))
+        else:
+            combined_forecast = []
+    except Exception as e:
+        logger.error(f"Ensemble forecast failed: {e}")
+
+    return {
+        "individual": results,
+        "ensemble": combined_forecast
+    }
