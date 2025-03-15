@@ -24,11 +24,11 @@ class StockRequest(BaseModel):
     indicators: Optional[List[str]] = ["SMA_50", "EMA_20", "RSI", "MACD", "BBANDS"]
     forecast_models: Optional[List[str]] = ["ARIMA", "PROPHET"]  
 
-app = FastAPI
+app = FastAPI()
 
 CACHE = {}
 
-class LSTMModel(nn.Modeule):
+class LSTMModel(nn.Module):
     """ this for advanced forcasting """
     def __init__(self, input_dim=1, hidden_dim=50, output_dim=1, num_layers=2):
         super(LSTMModel, self).__init__()
