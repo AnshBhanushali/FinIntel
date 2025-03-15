@@ -8,7 +8,7 @@ import pandas as pd
 import pandas_ta as ta
 
 # Options to use statsmodels, prophet, and your custom LSTM
-from statsmodels.tsa.arima.model import ARIMA, steps, forcast_arima
+from statsmodels.tsa.arima.model import ARIMA
 from prophet import Prophet
 import torch
 from torch import nn
@@ -89,7 +89,7 @@ def compute_indicators(df: pd.DataFrame, indicators: List[str]) -> pd.DataFrame:
             df["BB_lower"] = bb['BBL_20_2.0']
     return df
 
-def forcast_arima(series: pd.Series, step: int = 30):
+def forecast_arima(series: pd.Series, steps: int = 30):
     try:
         model = ARIMA(series, order = (1,1,1))
         model_fit = model.fit()
@@ -173,3 +173,28 @@ def ensemble_forecast(df: pd.DataFrame, models: List[str]) -> dict:
         "individual": results,
         "ensemble": combined_forecast
     }
+
+@app.post("/analyze-technical/")
+async def analyze_technical(request: StockRequest):
+    try:
+        df = await fetch_stock_data(
+            ticker=request.ticker,
+            start_date=request.start_date,
+            end_date=request.end_date
+        )
+        # Compute indicators
+        df_with_ind = compute_indicators(df, request.indicators)
+
+        # Forecast
+        ensemble_results = ensemble_forecast(df_with_ind, request.forecast_models)
+
+        # Package results
+        return {
+            "ticker": request.ticker,
+            "indicators": request.indicators,
+            "latest_indicators": df_with_ind.iloc[-1][request.indicators].to_dict(),
+            "forecasts": ensemble_results
+        }
+    except Exception as e:
+        logger.error(f"analyze_technical endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
