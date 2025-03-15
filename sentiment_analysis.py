@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import requests
 import torch
+import re
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -17,10 +18,15 @@ logger.setLevel(logging.INFO)
 
 app = FastAPI()
 
-# Load a FinBERT model
-FINBERT_MODEL = "ipuneetr/finbert-uncased"
-finbert_tokenizer = AutoTokenizer.from_pretrained(FINBERT_MODEL)
-finbert_model = AutoModelForSequenceClassification.from_pretrained(FINBERT_MODEL)
+# Load FinBERT model
+FINBERT_MODEL = "ProsusAI/finbert"
+
+try:
+    finbert_tokenizer = AutoTokenizer.from_pretrained(FINBERT_MODEL)
+    finbert_model = AutoModelForSequenceClassification.from_pretrained(FINBERT_MODEL)
+except Exception as e:
+    logger.error(f"Error loading FinBERT model: {e}")
+    raise RuntimeError("Failed to load FinBERT. Check internet connection or model availability.")
 
 label_map = {0: "negative", 1: "neutral", 2: "positive"}
 
@@ -52,10 +58,13 @@ def classify_stock(sentiment_score, var_loss):
     """Classifies a stock based on sentiment and risk."""
     if sentiment_score > 0.6 and var_loss < 5:
         return "BUY"
-    elif sentiment_score < 0.4 and var_loss > 10:
+    elif sentiment_score < 0.5 and var_loss > 10:  # Fix threshold
         return "SELL"
     else:
         return "HOLD"
+
+
+
 
 def query_ollama(prompt: str):
     """Query Ollama for advanced sentiment and summary analysis."""
@@ -85,25 +94,38 @@ def analyze_sentiment(request: SentimentRequest):
     5. Return classification (Buy/Sell/Hold) with confidence.
     """
     try:
-        # 1) Fetching mock data
+        # 1) Fetching mock data (should be replaced with real data)
         texts = [
             f"{request.ticker} is doing great! Big upside expected.",
             f"Some negative outlook for {request.ticker} due to supply chain issues."
         ]
 
+        if not texts:
+            raise HTTPException(status_code=400, detail="No sentiment data available.")
+
         # 2) FinBERT Sentiment Classification
         total_score = 0
         for txt in texts:
-            inputs = finbert_tokenizer(txt, return_tensors="pt", max_length=512, truncation=True)
-            outputs = finbert_model(**inputs)
-            probs = torch.softmax(outputs.logits, dim=1).detach().numpy()[0]
-            sentiment_idx = probs.argmax()
-            if sentiment_idx == 2:  
-                total_score += probs[sentiment_idx]  
-            elif sentiment_idx == 0:  
-                total_score -= probs[sentiment_idx]  
-            else:
-                total_score += 0  
+            try:
+                inputs = finbert_tokenizer(txt, return_tensors="pt", max_length=512, truncation=True)
+                outputs = finbert_model(**inputs)
+
+                # Convert logits to probabilities
+                logits = outputs.logits.squeeze(0)  # Ensure proper tensor shape
+                probs = torch.softmax(logits, dim=0).detach().numpy()
+
+                sentiment_idx = probs.argmax()
+
+                if sentiment_idx == 2:  
+                    total_score += probs[sentiment_idx]  
+                elif sentiment_idx == 0:  
+                    total_score -= probs[sentiment_idx]  
+            except Exception as e:
+                logger.error(f"Error processing text '{txt}' with FinBERT: {e}")
+                continue
+
+        if total_score == 0:  
+            raise HTTPException(status_code=500, detail="FinBERT sentiment analysis failed.")
 
         avg_sentiment_score = total_score / len(texts)
         normalized_sentiment = (avg_sentiment_score + 1) / 2  
@@ -115,10 +137,15 @@ def analyze_sentiment(request: SentimentRequest):
         )
         ollama_response = query_ollama(ollama_prompt)
 
-        # Extract Ollama's rating (fallback to FinBERT if it fails)
+        # Extract Ollama's rating (fallback to FinBERT if extraction fails)
         try:
-            ollama_score = float(re.search(r"Sentiment Score: (\d\.\d+)", ollama_response).group(1))
-        except:
+            match = re.search(r"Sentiment Score: (\d\.\d+)", ollama_response)
+            if match:
+                ollama_score = float(match.group(1))
+            else:
+                ollama_score = normalized_sentiment  
+        except Exception as e:
+            logger.error(f"Failed to extract sentiment score from Ollama: {e}")
             ollama_score = normalized_sentiment  
 
         # 4) Monte Carlo for risk analysis
@@ -127,6 +154,9 @@ def analyze_sentiment(request: SentimentRequest):
         dist = simulate_monte_carlo(mean_return, std_dev, days=30, simulations=1000)
         var_loss = calculate_var(dist, confidence=0.95)
 
+        print(f"DEBUG: Sentiment Score: {ollama_score}, VaR Loss: {var_loss}")
+        print(f"DEBUG: Classification Logic - BUY: {ollama_score > 0.6 and var_loss < 5}, SELL: {ollama_score < 0.5 and var_loss > 10}")
+        
         # 5) Classify the stock
         recommendation = classify_stock(ollama_score, var_loss)
         confidence = round(abs(ollama_score), 2)  
