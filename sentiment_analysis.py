@@ -163,10 +163,10 @@ def analyze_sentiment(request: SentimentRequest):
 
         return {
             "ticker": request.ticker,
-            "average_sentiment": ollama_score,
+            "average_sentiment": float(ollama_score),
             "var_loss_95": var_loss,
             "recommendation": recommendation,
-            "confidence_score": confidence,
+            "confidence_score": round(float(abs(ollama_score)), 2),
             "ollama_analysis": ollama_response
         }
     except Exception as e:
