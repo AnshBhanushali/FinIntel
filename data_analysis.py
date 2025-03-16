@@ -10,6 +10,8 @@ from statsmodels.tsa.arima.model import ARIMA
 from prophet import Prophet
 import torch
 from torch import nn
+import os
+from dotenv import load_dotenv
 
 # Setup logger
 logger = logging.getLogger("data_analysis_agent")
@@ -21,8 +23,10 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.propagate = False  # Prevent duplicate logs
 
+load_dotenv()
+
 # Alpha Vantage API Key
-ALPHA_VANTAGE_API_KEY = "UMWT45DZO156S1PZ"  # Your provided key
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY") 
 
 class StockRequest(BaseModel):
     ticker: str
