@@ -7,8 +7,12 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
+from dotenv import load_dotenv
 
 from pypfopt import EfficientFrontier, risk_models, expected_returns
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -19,7 +23,13 @@ app = FastAPI(title="Production Investment Guidance API")
 # Endpoints for other services
 DATA_AGENT_URL = os.getenv("DATA_AGENT_URL", "http://data_analysis_agent:8000/analyze-technical")
 SENTIMENT_AGENT_URL = os.getenv("SENTIMENT_AGENT_URL", "http://localhost:8000/sentiment/analyze-sentiment")
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/run")
+# IMPORTANT: Update the LLM endpoint for Ollama version 0.5.12
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/run")
+
+
+load_dotenv()
+print("OLLAMA_URL is:", os.getenv("OLLAMA_URL", "http://localhost:11434/generate"))
+
 
 class GuidanceRequest(BaseModel):
     tickers: List[str]
@@ -66,7 +76,7 @@ def fetch_price_data(ticker: str, start_date: str, end_date: str) -> pd.DataFram
             raise HTTPException(status_code=500, detail=f"Expected '{key_}' column not found in data")
         df[key_] = df[key_].astype(float)
     
-    # Compute an average price
+    # Compute an average price from open, high, low, and close
     df["price"] = df[required_keys].mean(axis=1)
     
     # Filter by date range
