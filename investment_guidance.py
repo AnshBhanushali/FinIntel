@@ -31,8 +31,7 @@ async def get_investment_guidance(request: GuidanceRequest):
     4. Provide recommended allocations, expected returns, risk metrics.
     """
     try:
-        # Step 1: Gather historical data concurrently (just an example of how you might do it)
-        # In practice, you might fetch from your DB rather than calling the data agent.
+        # Step 1: Gather historical data concurrently 
         tasks = []
         for ticker in request.tickers:
             payload = {
@@ -52,8 +51,7 @@ async def get_investment_guidance(request: GuidanceRequest):
             if isinstance(data_responses[idx], Exception):
                 logger.error(f"Error retrieving data for {ticker}: {data_responses[idx]}")
                 continue
-            # The data agent response might contain an entire dataset or a forecast
-            # We'll mock up a random timeseries:
+
             import numpy as np
             rng = pd.date_range("2020-01-01", periods=1000, freq="D")
             closes = np.random.normal(100, 10, size=1000)  # random data
@@ -81,9 +79,39 @@ async def get_investment_guidance(request: GuidanceRequest):
         cleaned_weights = ef.clean_weights()
         expected_ret, volatility, sharpe = ef.portfolio_performance()
 
+        # Step 5: Prepare final results
+        allocations = {}
+        for ticker, weight in cleaned_weights.items():
+            allocations[ticker] = round(weight * request.initial_capital, 2)
+
+        # Optional: fetch sentiment data for each ticker to show an overlay
+        sentiment_overview = {}
+        for ticker in request.tickers:
+            s_payload = {"ticker": ticker, "sources": ["news", "twitter"]}
+            try:
+                s_response = requests.post(SENTIMENT_AGENT_URL, json=s_payload).json()
+                sentiment_overview[ticker] = {
+                    "average_sentiment": s_response.get("average_sentiment"),
+                    "recommendation": s_response.get("recommendation")
+                }
+            except Exception as e:
+                logger.error(f"Could not fetch sentiment for {ticker}: {e}")
+                sentiment_overview[ticker] = {"error": str(e)}
+
+        return {
+            "risk_tolerance": request.risk_tolerance,
+            "total_capital": request.initial_capital,
+            "allocation": allocations,
+            "expected_annual_return": round(expected_ret, 4),
+            "annual_volatility": round(volatility, 4),
+            "sharpe_ratio": round(sharpe, 4),
+            "sentiment": sentiment_overview
+        }
+
     except Exception as e:
         logger.error(f"Investment Guidance error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    
 
 async def post_json(url, payload):
     """
