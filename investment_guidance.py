@@ -123,6 +123,9 @@ async def get_investment_guidance(request: GuidanceRequest):
             "market_outlook": llm_summary
         }
 
+    except HTTPException as he:
+        # Re-raise HTTPExceptions as-is so that proper status codes are returned.
+        raise he
     except Exception as e:
         logger.error(f"Investment Guidance error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -153,4 +156,3 @@ async def ollama_query(prompt: str) -> str:
                 return "LLM query failed."
             data = await resp.json()
             return data.get("output", "No output from LLM.")
-
