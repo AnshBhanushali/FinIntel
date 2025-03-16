@@ -12,3 +12,9 @@ logger = logging.getLogger("investment_guidance")
 logger.setLevel(logger.INFO)
 
 app = FastAPI()
+
+class GuidanceRequest(BaseModel):
+    tickers : List[str]
+    initial_capital: float = 10000
+    risk_tolerance: Optional[str] = "medium" # User can choose between low, medium, high
+
