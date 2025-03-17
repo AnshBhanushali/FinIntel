@@ -15,7 +15,10 @@ from typing import List, Optional
 from dotenv import load_dotenv
 from pypfopt import EfficientFrontier, risk_models, expected_returns
 
-# Load environment variables from .env file
+# Import Hugging Face Summarization
+from transformers import pipeline
+
+# Load environment variables (optional)
 load_dotenv()
 
 # Configure logging
@@ -24,32 +27,22 @@ logger = logging.getLogger("investment_guidance")
 
 app = FastAPI(title="Production Investment Guidance API")
 
-# Endpoints for other services
-DATA_AGENT_URL = os.getenv("DATA_AGENT_URL", "http://data_analysis_agent:8000/analyze-technical")
-SENTIMENT_AGENT_URL = os.getenv("SENTIMENT_AGENT_URL", "http://localhost:8000/sentiment/analyze-sentiment")
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")  # Corrected endpoint
-
-# Log the URLs for debugging
-logger.info(f"OLLAMA_URL is: {OLLAMA_URL}")
-
 class GuidanceRequest(BaseModel):
     tickers: List[str]
     initial_capital: float = 10000.0
-    risk_tolerance: Optional[str] = "medium"  # Options: low, medium, high
+    risk_tolerance: Optional[str] = "medium"  # low, medium, high
 
 def fetch_price_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """
-    Fetches historical stock price data using Yahoo Finance (yfinance).
-    """
+    """Fetches historical stock price data with yfinance."""
     try:
-        logger.info(f"Fetching data for {ticker} from Yahoo Finance")
         stock = yf.Ticker(ticker)
         df = stock.history(start=start_date, end=end_date)
-
         if df.empty:
-            raise HTTPException(status_code=404, detail=f"No data found for {ticker} in the given date range")
-
-        # Compute an average price from Open, High, Low, and Close
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No data found for {ticker} in the given date range"
+            )
+        # Compute an average price
         df["price"] = df[["Open", "High", "Low", "Close"]].mean(axis=1)
         return df
     except Exception as e:
@@ -57,62 +50,73 @@ def fetch_price_data(ticker: str, start_date: str, end_date: str) -> pd.DataFram
         raise HTTPException(status_code=500, detail=f"Failed to fetch data for {ticker}")
 
 def generate_stock_graph(df: pd.DataFrame, ticker: str) -> str:
-    """
-    Generates a stock price graph and returns it as a base64 string.
-    """
+    """Generates a simple stock price graph as a base64-encoded PNG."""
     plt.figure(figsize=(10, 5))
-    plt.plot(df.index, df["Close"], label=f"{ticker} Stock Price", color="blue")
+    plt.plot(df.index, df["Close"], label=f"{ticker} Stock Price")
     plt.xlabel("Date")
     plt.ylabel("Closing Price (USD)")
     plt.title(f"{ticker} Stock Price Trend")
     plt.legend()
     plt.grid()
 
-    # Convert plot to base64 image
     img_buffer = io.BytesIO()
     plt.savefig(img_buffer, format="png")
     img_buffer.seek(0)
     encoded_img = base64.b64encode(img_buffer.read()).decode("utf-8")
     plt.close()
-
     return f"data:image/png;base64,{encoded_img}"
 
-@app.get("/routes")
-def list_routes():
-    return {"routes": [route.path for route in app.routes]}
+# 1) Initialize a Hugging Face pipeline for summarization
+summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
 
+def generate_market_outlook(summary_prompt: str) -> str:
+    """
+    Generates a short "Market Outlook" by summarizing prompt text
+    using a Hugging Face summarization model.
+    """
+    try:
+        # The summarizer expects a string to summarize
+        summary_output = summarizer(
+            summary_prompt, 
+            max_length=60, 
+            min_length=20, 
+            do_sample=False
+        )
+        # Return the summary text
+        return summary_output[0]["summary_text"]
+    except Exception as e:
+        logger.error(f"Summarization failed: {e}")
+        return "Unable to generate market outlook at this time."
 
 @app.post("/investment-guidance/get-investment-guidance")
 async def get_investment_guidance(request: GuidanceRequest):
     """
-    Investment guidance service using Yahoo Finance:
-    1. Retrieves daily price data.
-    2. Computes expected returns and optimizes the portfolio.
-    3. Fetches sentiment data concurrently.
-    4. Generates a market outlook using an LLM.
-    5. Returns stock price graphs and tickers.
+    1. Retrieve daily price data
+    2. Compute expected returns and optimize the portfolio
+    3. (Optional) Fetch sentiment data concurrently
+    4. Generate a market outlook using a BERT/BART summarizer
+    5. Return graphs and details
     """
     try:
         combined_prices = pd.DataFrame()
         stock_graphs = {}
 
-        # Fetch price data and generate graphs for each ticker
+        # Fetch price data
         for ticker in request.tickers:
             df = fetch_price_data(ticker, "2023-01-01", "2024-01-01")
             if "price" not in df.columns:
-                raise HTTPException(status_code=500, detail="Expected computed 'price' column not found in data")
-
+                raise HTTPException(status_code=500, detail="Missing 'price' column.")
             combined_prices[ticker] = df["price"]
             stock_graphs[ticker] = generate_stock_graph(df, ticker)
 
         if combined_prices.empty:
             raise HTTPException(status_code=400, detail="No valid price data retrieved.")
 
-        # Compute expected returns and covariance
+        # Compute expected returns & covariance
         mu = expected_returns.mean_historical_return(combined_prices)
         S = risk_models.sample_cov(combined_prices)
 
-        # Optimize portfolio based on risk tolerance
+        # Optimize portfolio
         ef = EfficientFrontier(mu, S)
         if request.risk_tolerance.lower() == "high":
             ef.max_quadratic_utility(risk_aversion=0.5)
@@ -120,6 +124,7 @@ async def get_investment_guidance(request: GuidanceRequest):
             ef.min_volatility()
         else:
             ef.max_sharpe()
+
         cleaned_weights = ef.clean_weights()
         expected_ret, volatility, sharpe = ef.portfolio_performance()
 
@@ -128,51 +133,31 @@ async def get_investment_guidance(request: GuidanceRequest):
             for ticker, weight in cleaned_weights.items()
         }
 
-        # Fetch sentiment data concurrently
+        # (Optional) Sentiment step if you have a separate sentiment endpoint...
         sentiment_overview = {}
-        sentiment_tasks = []
-        for ticker in request.tickers:
-            s_payload = {"ticker": ticker, "sources": ["news", "twitter"]}
-            sentiment_tasks.append(asyncio.create_task(post_json(SENTIMENT_AGENT_URL, s_payload)))
-        sentiment_results = await asyncio.gather(*sentiment_tasks, return_exceptions=True)
-        for idx, ticker in enumerate(request.tickers):
-            if isinstance(sentiment_results[idx], Exception):
-                logger.error(f"Sentiment error for {ticker}: {sentiment_results[idx]}")
-                sentiment_overview[ticker] = {"error": str(sentiment_results[idx])}
-            else:
-                sentiment_overview[ticker] = {
-                    "average_sentiment": sentiment_results[idx].get("average_sentiment"),
-                    "recommendation": sentiment_results[idx].get("recommendation"),
-                }
+        # For example, fetch from another route or skip
 
-        # Generate market outlook via LLM (Ollama)
-        ollama_prompt = (
-            f"Given a portfolio with an expected annual return of {expected_ret:.2%}, "
-            f"annual volatility of {volatility:.2%}, and a Sharpe ratio of {sharpe:.2f}, "
-            f"and considering the following sentiment overview: {json.dumps(sentiment_overview)}, "
-            f"provide a market outlook and recommended investment strategy for an initial capital of {request.initial_capital} "
-            f"with a {request.risk_tolerance} risk tolerance."
+        # 4) Summarize Market Outlook via Hugging Face summarizer
+        outlook_prompt = (
+            f"Portfolio expected annual return: {expected_ret:.2%}, "
+            f"volatility: {volatility:.2%}, Sharpe ratio: {sharpe:.2f}. "
+            f"Sentiment data: {json.dumps(sentiment_overview)}. "
+            f"Please provide a concise market outlook for a {request.risk_tolerance} "
+            f"risk tolerance with an initial capital of {request.initial_capital}."
         )
-        try:
-            llm_summary = await ollama_query(ollama_prompt)
-        except HTTPException as e:
-            logger.error(f"Ollama query failed: {str(e)}")
-            llm_summary = (
-                f"Unable to fetch market outlook due to external service error. Based on sentiment analysis, "
-                f"the market appears {'positive' if sum(s.get('average_sentiment', 0) for s in sentiment_overview.values()) > 0 else 'neutral or negative'}."
-            )
 
-        # Ensure tickers are included in the response
+        market_outlook_summary = generate_market_outlook(outlook_prompt)
+
         return {
-            "tickers": request.tickers,  # Explicitly include the input tickers
+            "tickers": request.tickers,
             "risk_tolerance": request.risk_tolerance,
             "total_capital": request.initial_capital,
             "allocation": allocations,
-            "expected_annual_return": round(expected_ret * 100, 4),  # Convert to percentage
-            "annual_volatility": round(volatility * 100, 4),  # Convert to percentage
+            "expected_annual_return": round(expected_ret * 100, 4),
+            "annual_volatility": round(volatility * 100, 4),
             "sharpe_ratio": round(sharpe, 4),
-            "sentiment": sentiment_overview,
-            "market_outlook": llm_summary,
+            "sentiment": sentiment_overview,  # or skip if no sentiment
+            "market_outlook": market_outlook_summary,
             "stock_graphs": stock_graphs
         }
 
@@ -181,42 +166,3 @@ async def get_investment_guidance(request: GuidanceRequest):
     except Exception as e:
         logger.error(f"Investment Guidance error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-async def post_json(url: str, payload: dict):
-    """
-    Async helper to POST JSON data to another service.
-    """
-    import aiohttp
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise HTTPException(status_code=resp.status, detail=text)
-            return await resp.json()
-
-async def ollama_query(prompt: str) -> str:
-    """
-    Async helper to query an LLM (e.g., Ollama) for market insights.
-    """
-    import aiohttp
-
-    payload = {
-        "model": "llama2",  
-        "prompt": prompt,
-        "stream": False
-    }
-
-    logger.info(f"Sending request to Ollama: {payload}")
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(OLLAMA_URL, json=payload) as resp:
-            text = await resp.text()  # Log full response
-            logger.info(f"Ollama response status: {resp.status}")
-            logger.info(f"Ollama response text: {text}")
-
-            if resp.status != 200:
-                raise HTTPException(status_code=resp.status, detail=f"Ollama request failed: {text}")
-            
-            result = await resp.json()
-            return result.get("response", "No response from LLM")
-
