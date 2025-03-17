@@ -1,9 +1,6 @@
 import logging
-import datetime
 import random
 import numpy as np
-import pandas as pd
-import requests
 import torch
 import re
 
@@ -18,11 +15,10 @@ logger.setLevel(logging.INFO)
 
 app = FastAPI()
 
-# Root route
 @app.get("/")
 def root():
     """API health check route."""
-    return {"message": "Welcome to the Sentiment Analysis API"}
+    return {"message": "Welcome to the Sentiment Analysis API (FinBERT-only)"}
 
 # Load FinBERT model
 FINBERT_MODEL = "ProsusAI/finbert"
@@ -40,28 +36,34 @@ class SentimentRequest(BaseModel):
     ticker: str
     sources: List[str] = ["news", "twitter"]
 
-def simulate_monte_carlo(mean_return, std_dev, days=30, simulations=1000):
-    """Simulate daily returns to get a distribution of potential outcomes."""
+def simulate_monte_carlo(mean_return: float, std_dev: float, days: int = 30, simulations: int = 1000):
+    """
+    Simulate daily returns to get a distribution of potential outcomes.
+    Ensure that returned prices are Python floats (avoid NumPy float32).
+    """
     final_prices = []
-    initial_price = 100  
+    initial_price = 100.0
     for _ in range(simulations):
-        daily_returns = np.random.normal(mean_return, std_dev, days)
+        daily_returns = np.random.normal(float(mean_return), float(std_dev), days)
         price_path = initial_price
         for r in daily_returns:
-            price_path *= (1 + r)
-        final_prices.append(price_path)
-    return final_prices  
+            price_path *= (1.0 + float(r))
+        final_prices.append(float(price_path))
+    return final_prices
 
-def calculate_var(price_distribution, confidence=0.95):
-    """Value at Risk (VaR) estimation."""
+def calculate_var(price_distribution: list, confidence: float = 0.95):
+    """Value at Risk (VaR) estimation, ensuring we return a Python float."""
     sorted_prices = sorted(price_distribution)
     index = int((1 - confidence) * len(sorted_prices))
-    var_price = sorted_prices[index]
-    loss = 100 - var_price  
+    var_price = float(sorted_prices[index])
+    loss = float(100.0 - var_price)
     return loss
 
-def classify_stock(sentiment_score, var_loss):
-    """Classifies a stock based on sentiment and risk."""
+def classify_stock(sentiment_score: float, var_loss: float):
+    """
+    Classifies a stock based on sentiment and risk.
+    Return: "BUY", "SELL", or "HOLD".
+    """
     if sentiment_score > 0.6 and var_loss < 5:
         return "BUY"
     elif sentiment_score < 0.5 and var_loss > 10:
@@ -69,36 +71,17 @@ def classify_stock(sentiment_score, var_loss):
     else:
         return "HOLD"
 
-def query_ollama(prompt: str):
-    """Query Ollama for advanced sentiment and summary analysis."""
-    # Corrected endpoint for Ollama
-    url = "http://localhost:11434/generate"  
-    payload = {
-        "model": "llama2",  
-        "prompt": prompt
-    }
-    try:
-        response = requests.post(url, json=payload)
-        if response.status_code != 200:
-            logger.error(f"Ollama query failed with status {response.status_code}")
-            return f"Ollama query failed with status {response.status_code}"
-        return response.json().get("output", "No response from Ollama.")
-    except Exception as e:
-        logger.error(f"Ollama query exception: {e}")
-        return f"Ollama query encountered an exception: {e}"
-
 @app.post("/analyze-sentiment")
 def analyze_sentiment(request: SentimentRequest):
     """
-    Enhanced sentiment analysis:
-    1. Fetch relevant articles/posts (mocked here).
-    2. Use FinBERT for classification.
-    3. Query Ollama for summarization & advanced sentiment.
-    4. Aggregate scores and run Monte Carlo simulation.
-    5. Return classification (Buy/Sell/Hold) with confidence.
+    FinBERT-only sentiment analysis:
+    1. Generate mock headlines for the given ticker.
+    2. Classify sentiment using FinBERT (positive/negative).
+    3. Run a Monte Carlo simulation for Value at Risk.
+    4. Return classification (Buy/Sell/Hold) with confidence.
     """
     try:
-        # 1) Fetching mock data (should be replaced with real data)
+        # 1) Mock data for demonstration
         texts = [
             f"{request.ticker} is doing great! Big upside expected.",
             f"Some negative outlook for {request.ticker} due to supply chain issues."
@@ -108,71 +91,62 @@ def analyze_sentiment(request: SentimentRequest):
             raise HTTPException(status_code=400, detail="No sentiment data available.")
 
         # 2) FinBERT Sentiment Classification
-        total_score = 0
+        total_score = 0.0
         for txt in texts:
             try:
                 inputs = finbert_tokenizer(txt, return_tensors="pt", max_length=512, truncation=True)
                 outputs = finbert_model(**inputs)
 
-                # Convert logits to probabilities
                 logits = outputs.logits.squeeze(0)
                 probs = torch.softmax(logits, dim=0).detach().numpy()
 
-                sentiment_idx = probs.argmax()
-                # If positive, add to score; if negative, subtract from score
-                if sentiment_idx == 2:  
-                    total_score += probs[sentiment_idx]  
-                elif sentiment_idx == 0:  
-                    total_score -= probs[sentiment_idx]  
+                sentiment_idx = int(probs.argmax())
+                sentiment_prob = float(probs[sentiment_idx])
+
+                # If positive => add; if negative => subtract
+                if sentiment_idx == 2:  # positive
+                    total_score += sentiment_prob
+                elif sentiment_idx == 0:  # negative
+                    total_score -= sentiment_prob
+
             except Exception as e:
                 logger.error(f"Error processing text '{txt}' with FinBERT: {e}")
                 continue
 
-        if total_score == 0:  
-            raise HTTPException(status_code=500, detail="FinBERT sentiment analysis failed.")
+        if total_score == 0.0:
+            # If total_score is 0, no strong positive or negative found
+            # Return neutral or raise an error as per your business logic
+            logger.warning("FinBERT sentiment analysis yielded total_score of 0.")
+            return {
+                "ticker": request.ticker,
+                "average_sentiment": 0.0,
+                "var_loss_95": 0.0,
+                "recommendation": "HOLD",
+                "confidence_score": 0.0
+            }
 
-        avg_sentiment_score = total_score / len(texts)
-        normalized_sentiment = (avg_sentiment_score + 1) / 2  
+        avg_sentiment_score = float(total_score / len(texts))
+        normalized_sentiment = float((avg_sentiment_score + 1.0) / 2.0)
 
-        # 3) Query Ollama for more advanced sentiment analysis
-        ollama_prompt = (
-            f"Analyze financial sentiment based on these headlines:\n{texts}\n"
-            f"Summarize sentiment impact on {request.ticker} and rate it between 0 (negative) to 1 (positive)."
-        )
-        ollama_response = query_ollama(ollama_prompt)
-
-        # Try to extract a numeric sentiment score from Ollama's response
-        try:
-            match = re.search(r"Sentiment Score: (\d\.\d+)", ollama_response)
-            if match:
-                ollama_score = float(match.group(1))
-            else:
-                ollama_score = normalized_sentiment  
-        except Exception as e:
-            logger.error(f"Failed to extract sentiment score from Ollama: {e}")
-            ollama_score = normalized_sentiment  
-
-        # 4) Monte Carlo for risk analysis
-        mean_return = ollama_score / 100.0  
-        std_dev = 0.02  
+        # 3) Monte Carlo for risk analysis
+        mean_return = float(normalized_sentiment / 100.0)
+        std_dev = 0.02
         dist = simulate_monte_carlo(mean_return, std_dev, days=30, simulations=1000)
-        var_loss = calculate_var(dist, confidence=0.95)
+        var_loss = float(calculate_var(dist, confidence=0.95))
 
-        logger.info(f"DEBUG: Sentiment Score: {ollama_score}, VaR Loss: {var_loss}")
-        logger.info(f"DEBUG: Classification Logic - BUY: {ollama_score > 0.6 and var_loss < 5}, SELL: {ollama_score < 0.5 and var_loss > 10}")
-        
-        # 5) Classify the stock
-        recommendation = classify_stock(ollama_score, var_loss)
-        confidence = round(abs(ollama_score), 2)  
+        # 4) Classify the stock
+        recommendation = classify_stock(normalized_sentiment, var_loss)
+        confidence = round(abs(normalized_sentiment), 2)
 
         return {
             "ticker": request.ticker,
-            "average_sentiment": float(ollama_score),
+            "average_sentiment": normalized_sentiment,
             "var_loss_95": var_loss,
             "recommendation": recommendation,
             "confidence_score": confidence,
-            "ollama_analysis": ollama_response
+            "finbert_texts": texts
         }
+
     except Exception as e:
         logger.error(f"Sentiment Analysis error for {request.ticker}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
