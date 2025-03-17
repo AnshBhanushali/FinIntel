@@ -4,11 +4,15 @@ import asyncio
 import json
 import requests
 import pandas as pd
+import yfinance as yf
+import matplotlib.pyplot as plt
+import io
+import base64
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 from dotenv import load_dotenv
-
 from pypfopt import EfficientFrontier, risk_models, expected_returns
 
 # Load environment variables from .env file
@@ -23,13 +27,9 @@ app = FastAPI(title="Production Investment Guidance API")
 # Endpoints for other services
 DATA_AGENT_URL = os.getenv("DATA_AGENT_URL", "http://data_analysis_agent:8000/analyze-technical")
 SENTIMENT_AGENT_URL = os.getenv("SENTIMENT_AGENT_URL", "http://localhost:8000/sentiment/analyze-sentiment")
-# IMPORTANT: Update the LLM endpoint for Ollama version 0.5.12
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/run")
 
-
-load_dotenv()
 print("OLLAMA_URL is:", os.getenv("OLLAMA_URL", "http://localhost:11434/generate"))
-
 
 class GuidanceRequest(BaseModel):
     tickers: List[str]
@@ -38,71 +38,65 @@ class GuidanceRequest(BaseModel):
 
 def fetch_price_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     """
-    Fetches daily price data from Alpha Vantage using TIME_SERIES_DAILY (free plan).
-    Computes an average price from open, high, low, and close.
+    Fetches historical stock price data using Yahoo Finance (yfinance).
     """
-    logger.info(f"Fetching data for {ticker} from Alpha Vantage (TIME_SERIES_DAILY)")
-    api_key = os.getenv("ALPHA_VANTAGE_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="Alpha Vantage API key not provided")
-    
-    # Use TIME_SERIES_DAILY with compact output for ~100 days of data
-    url = (
-        f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY"
-        f"&symbol={ticker}&apikey={api_key}&outputsize=compact"
-    )
-    response = requests.get(url)
-    logger.info(f"Alpha Vantage raw response for {ticker}: {response.text}")
-    if response.status_code != 200:
-        raise HTTPException(status_code=response.status_code, detail="Error fetching data from Alpha Vantage")
-    
-    data = response.json()
-    if "Time Series (Daily)" not in data:
-        logger.error(f"Alpha Vantage response for {ticker} does not contain 'Time Series (Daily)'. Full response: {data}")
-        raise HTTPException(status_code=500, detail="Alpha Vantage response format error")
-    
-    ts_data = data["Time Series (Daily)"]
-    df = pd.DataFrame.from_dict(ts_data, orient="index")
-    
-    # Convert index to datetime and sort
-    df.index = pd.to_datetime(df.index)
-    df.sort_index(inplace=True)
-    
-    # Ensure required columns exist
-    required_keys = ["1. open", "2. high", "3. low", "4. close"]
-    for key_ in required_keys:
-        if key_ not in df.columns:
-            logger.error(f"DataFrame columns for {ticker}: {list(df.columns)}")
-            raise HTTPException(status_code=500, detail=f"Expected '{key_}' column not found in data")
-        df[key_] = df[key_].astype(float)
-    
-    # Compute an average price from open, high, low, and close
-    df["price"] = df[required_keys].mean(axis=1)
-    
-    # Filter by date range
-    df = df.loc[(df.index >= start_date) & (df.index <= end_date)]
-    if df.empty:
-        raise HTTPException(status_code=404, detail=f"No data for ticker {ticker} in the given date range")
-    
-    logger.info(f"Fetched DataFrame columns for {ticker}: {list(df.columns)}")
-    return df
+    try:
+        logger.info(f"Fetching data for {ticker} from Yahoo Finance")
+        stock = yf.Ticker(ticker)
+        df = stock.history(start=start_date, end=end_date)
+
+        if df.empty:
+            raise HTTPException(status_code=404, detail=f"No data found for {ticker} in the given date range")
+
+        # Compute an average price from Open, High, Low, and Close
+        df["price"] = df[["Open", "High", "Low", "Close"]].mean(axis=1)
+        return df
+    except Exception as e:
+        logger.error(f"Error fetching data for {ticker}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch data for {ticker}")
+
+def generate_stock_graph(df: pd.DataFrame, ticker: str) -> str:
+    """
+    Generates a stock price graph and returns it as a base64 string.
+    """
+    plt.figure(figsize=(10, 5))
+    plt.plot(df.index, df["Close"], label=f"{ticker} Stock Price", color="blue")
+    plt.xlabel("Date")
+    plt.ylabel("Closing Price (USD)")
+    plt.title(f"{ticker} Stock Price Trend")
+    plt.legend()
+    plt.grid()
+
+    # Convert plot to base64 image
+    img_buffer = io.BytesIO()
+    plt.savefig(img_buffer, format="png")
+    img_buffer.seek(0)
+    encoded_img = base64.b64encode(img_buffer.read()).decode("utf-8")
+    plt.close()
+
+    return f"data:image/png;base64,{encoded_img}"
 
 @app.post("/get-investment-guidance")
 async def get_investment_guidance(request: GuidanceRequest):
     """
-    Investment guidance service using Alpha Vantage (free plan):
-    1. Retrieves daily price data (computes average price).
-    2. Computes expected returns and optimizes the portfolio using PyPortfolioOpt.
+    Investment guidance service using Yahoo Finance:
+    1. Retrieves daily price data.
+    2. Computes expected returns and optimizes the portfolio.
     3. Fetches sentiment data concurrently.
     4. Generates a market outlook using an LLM.
+    5. Returns stock price graphs.
     """
     try:
         combined_prices = pd.DataFrame()
+        stock_graphs = {}
+
         for ticker in request.tickers:
-            df = fetch_price_data(ticker, "2020-01-01", "2025-01-01")
+            df = fetch_price_data(ticker, "2023-01-01", "2024-01-01")
             if "price" not in df.columns:
                 raise HTTPException(status_code=500, detail="Expected computed 'price' column not found in data")
+
             combined_prices[ticker] = df["price"]
+            stock_graphs[ticker] = generate_stock_graph(df, ticker)
 
         if combined_prices.empty:
             raise HTTPException(status_code=400, detail="No valid price data retrieved.")
@@ -162,7 +156,8 @@ async def get_investment_guidance(request: GuidanceRequest):
             "annual_volatility": round(volatility, 4),
             "sharpe_ratio": round(sharpe, 4),
             "sentiment": sentiment_overview,
-            "market_outlook": llm_summary
+            "market_outlook": llm_summary,
+            "stock_graphs": stock_graphs
         }
 
     except HTTPException as he:
@@ -185,15 +180,9 @@ async def post_json(url: str, payload: dict):
 
 async def ollama_query(prompt: str) -> str:
     """
-    Async helper to query an LLM (e.g., Ollama) for narrative insights.
+    Async helper to query an LLM (e.g., Ollama) for market insights.
     """
     import aiohttp
-    payload = {"model": "llama2", "prompt": prompt}
     async with aiohttp.ClientSession() as session:
-        async with session.post(OLLAMA_URL, json=payload) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                logger.error(f"Ollama query failed with status {resp.status}: {text}")
-                return "LLM query failed."
-            data = await resp.json()
-            return data.get("output", "No output from LLM.")
+        async with session.post(OLLAMA_URL, json={"model": "llama2", "prompt": prompt}) as resp:
+            return await resp.text()
