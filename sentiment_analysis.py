@@ -18,6 +18,12 @@ logger.setLevel(logging.INFO)
 
 app = FastAPI()
 
+# Root route
+@app.get("/")
+def root():
+    """API health check route."""
+    return {"message": "Welcome to the Sentiment Analysis API"}
+
 # Load FinBERT model
 FINBERT_MODEL = "ProsusAI/finbert"
 
@@ -58,17 +64,15 @@ def classify_stock(sentiment_score, var_loss):
     """Classifies a stock based on sentiment and risk."""
     if sentiment_score > 0.6 and var_loss < 5:
         return "BUY"
-    elif sentiment_score < 0.5 and var_loss > 10:  # Fix threshold
+    elif sentiment_score < 0.5 and var_loss > 10:
         return "SELL"
     else:
         return "HOLD"
 
-
-
-
 def query_ollama(prompt: str):
     """Query Ollama for advanced sentiment and summary analysis."""
-    url = "http://localhost:11434/run"  
+    # Corrected endpoint for Ollama
+    url = "http://localhost:11434/generate"  
     payload = {
         "model": "llama2",  
         "prompt": prompt
@@ -83,7 +87,7 @@ def query_ollama(prompt: str):
         logger.error(f"Ollama query exception: {e}")
         return f"Ollama query encountered an exception: {e}"
 
-@app.post("/analyze-sentiment/")
+@app.post("/analyze-sentiment")
 def analyze_sentiment(request: SentimentRequest):
     """
     Enhanced sentiment analysis:
@@ -111,11 +115,11 @@ def analyze_sentiment(request: SentimentRequest):
                 outputs = finbert_model(**inputs)
 
                 # Convert logits to probabilities
-                logits = outputs.logits.squeeze(0)  # Ensure proper tensor shape
+                logits = outputs.logits.squeeze(0)
                 probs = torch.softmax(logits, dim=0).detach().numpy()
 
                 sentiment_idx = probs.argmax()
-
+                # If positive, add to score; if negative, subtract from score
                 if sentiment_idx == 2:  
                     total_score += probs[sentiment_idx]  
                 elif sentiment_idx == 0:  
@@ -137,7 +141,7 @@ def analyze_sentiment(request: SentimentRequest):
         )
         ollama_response = query_ollama(ollama_prompt)
 
-        # Extract Ollama's rating (fallback to FinBERT if extraction fails)
+        # Try to extract a numeric sentiment score from Ollama's response
         try:
             match = re.search(r"Sentiment Score: (\d\.\d+)", ollama_response)
             if match:
@@ -154,8 +158,8 @@ def analyze_sentiment(request: SentimentRequest):
         dist = simulate_monte_carlo(mean_return, std_dev, days=30, simulations=1000)
         var_loss = calculate_var(dist, confidence=0.95)
 
-        print(f"DEBUG: Sentiment Score: {ollama_score}, VaR Loss: {var_loss}")
-        print(f"DEBUG: Classification Logic - BUY: {ollama_score > 0.6 and var_loss < 5}, SELL: {ollama_score < 0.5 and var_loss > 10}")
+        logger.info(f"DEBUG: Sentiment Score: {ollama_score}, VaR Loss: {var_loss}")
+        logger.info(f"DEBUG: Classification Logic - BUY: {ollama_score > 0.6 and var_loss < 5}, SELL: {ollama_score < 0.5 and var_loss > 10}")
         
         # 5) Classify the stock
         recommendation = classify_stock(ollama_score, var_loss)
@@ -166,7 +170,7 @@ def analyze_sentiment(request: SentimentRequest):
             "average_sentiment": float(ollama_score),
             "var_loss_95": var_loss,
             "recommendation": recommendation,
-            "confidence_score": round(float(abs(ollama_score)), 2),
+            "confidence_score": confidence,
             "ollama_analysis": ollama_response
         }
     except Exception as e:

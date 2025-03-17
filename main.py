@@ -28,7 +28,7 @@ async def root():
 app.mount("/analyze-technical", data_analysis_app)
 app.mount("/fundamentals", fundamental_analysis_app)
 app.mount("/sentiment", sentiment_analysis_app)
-app.mount("/investment-guidance", investment_guidance_app)
+app.mount("/", investment_guidance_app)
 
 
 if __name__ == "__main__":
