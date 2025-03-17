@@ -27,9 +27,10 @@ app = FastAPI(title="Production Investment Guidance API")
 # Endpoints for other services
 DATA_AGENT_URL = os.getenv("DATA_AGENT_URL", "http://data_analysis_agent:8000/analyze-technical")
 SENTIMENT_AGENT_URL = os.getenv("SENTIMENT_AGENT_URL", "http://localhost:8000/sentiment/analyze-sentiment")
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/run")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")  # Corrected endpoint
 
-print("OLLAMA_URL is:", os.getenv("OLLAMA_URL", "http://localhost:11434/generate"))
+# Log the URLs for debugging
+logger.info(f"OLLAMA_URL is: {OLLAMA_URL}")
 
 class GuidanceRequest(BaseModel):
     tickers: List[str]
@@ -76,7 +77,12 @@ def generate_stock_graph(df: pd.DataFrame, ticker: str) -> str:
 
     return f"data:image/png;base64,{encoded_img}"
 
-@app.post("/get-investment-guidance")
+@app.get("/routes")
+def list_routes():
+    return {"routes": [route.path for route in app.routes]}
+
+
+@app.post("/investment-guidance/get-investment-guidance")
 async def get_investment_guidance(request: GuidanceRequest):
     """
     Investment guidance service using Yahoo Finance:
@@ -84,12 +90,13 @@ async def get_investment_guidance(request: GuidanceRequest):
     2. Computes expected returns and optimizes the portfolio.
     3. Fetches sentiment data concurrently.
     4. Generates a market outlook using an LLM.
-    5. Returns stock price graphs.
+    5. Returns stock price graphs and tickers.
     """
     try:
         combined_prices = pd.DataFrame()
         stock_graphs = {}
 
+        # Fetch price data and generate graphs for each ticker
         for ticker in request.tickers:
             df = fetch_price_data(ticker, "2023-01-01", "2024-01-01")
             if "price" not in df.columns:
@@ -140,20 +147,29 @@ async def get_investment_guidance(request: GuidanceRequest):
 
         # Generate market outlook via LLM (Ollama)
         ollama_prompt = (
-            f"Given a portfolio with an expected annual return of {expected_ret:.2f}, "
-            f"annual volatility of {volatility:.2f}, and a Sharpe ratio of {sharpe:.2f}, "
-            f"and considering the following sentiment overview: {sentiment_overview}, "
+            f"Given a portfolio with an expected annual return of {expected_ret:.2%}, "
+            f"annual volatility of {volatility:.2%}, and a Sharpe ratio of {sharpe:.2f}, "
+            f"and considering the following sentiment overview: {json.dumps(sentiment_overview)}, "
             f"provide a market outlook and recommended investment strategy for an initial capital of {request.initial_capital} "
             f"with a {request.risk_tolerance} risk tolerance."
         )
-        llm_summary = await ollama_query(ollama_prompt)
+        try:
+            llm_summary = await ollama_query(ollama_prompt)
+        except HTTPException as e:
+            logger.error(f"Ollama query failed: {str(e)}")
+            llm_summary = (
+                f"Unable to fetch market outlook due to external service error. Based on sentiment analysis, "
+                f"the market appears {'positive' if sum(s.get('average_sentiment', 0) for s in sentiment_overview.values()) > 0 else 'neutral or negative'}."
+            )
 
+        # Ensure tickers are included in the response
         return {
+            "tickers": request.tickers,  # Explicitly include the input tickers
             "risk_tolerance": request.risk_tolerance,
             "total_capital": request.initial_capital,
             "allocation": allocations,
-            "expected_annual_return": round(expected_ret, 4),
-            "annual_volatility": round(volatility, 4),
+            "expected_annual_return": round(expected_ret * 100, 4),  # Convert to percentage
+            "annual_volatility": round(volatility * 100, 4),  # Convert to percentage
             "sharpe_ratio": round(sharpe, 4),
             "sentiment": sentiment_overview,
             "market_outlook": llm_summary,
@@ -183,6 +199,24 @@ async def ollama_query(prompt: str) -> str:
     Async helper to query an LLM (e.g., Ollama) for market insights.
     """
     import aiohttp
+
+    payload = {
+        "model": "llama2",  
+        "prompt": prompt,
+        "stream": False
+    }
+
+    logger.info(f"Sending request to Ollama: {payload}")
+
     async with aiohttp.ClientSession() as session:
-        async with session.post(OLLAMA_URL, json={"model": "llama2", "prompt": prompt}) as resp:
-            return await resp.text()
+        async with session.post(OLLAMA_URL, json=payload) as resp:
+            text = await resp.text()  # Log full response
+            logger.info(f"Ollama response status: {resp.status}")
+            logger.info(f"Ollama response text: {text}")
+
+            if resp.status != 200:
+                raise HTTPException(status_code=resp.status, detail=f"Ollama request failed: {text}")
+            
+            result = await resp.json()
+            return result.get("response", "No response from LLM")
+
